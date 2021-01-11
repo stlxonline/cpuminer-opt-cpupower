@@ -414,6 +414,8 @@ bool stratum_subscribe(struct stratum_ctx *sctx);
 bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *pass);
 bool stratum_handle_method(struct stratum_ctx *sctx, const char *s);
 
+char* deblank(char* input);
+
 /* rpc 2.0 (xmr) */
 
 

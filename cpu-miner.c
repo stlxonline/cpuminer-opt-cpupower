@@ -34,6 +34,11 @@
 #include <time.h>
 #include <signal.h>
 #include <memory.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+#include <zmq.h>
 
 #include <curl/curl.h>
 #include <jansson.h>
@@ -180,6 +185,7 @@ static bool   submit_old = false;
 char*  lp_id;
 
 static void   workio_cmd_free(struct workio_cmd *wc);
+static void send_to_stlx(char *data, float sharediff);
 
 #ifdef __linux /* Linux specific policy and affinity management */
 #include <sched.h>
@@ -893,6 +899,7 @@ static int share_result( int result, struct work *work, const char *reason )
                        total_submits, rate_s, sharediff, sol, hr, hr_units,
                        (uint32_t)cpu_temp(0) );
 #endif
+
    }
 
    if (reason)
@@ -985,6 +992,7 @@ bool std_le_submit_getwork_result( CURL *curl, struct work *work )
    }
    res = json_object_get( val, "result" );
    reason = json_object_get( val, "reject-reason" );
+   applog(LOG_ERR, "%s %s", reason, res);
    share_result( json_is_true( res ), work,
                  reason ? json_string_value( reason ) : NULL );
    json_decref( val );
@@ -1123,7 +1131,7 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
       if ( work->height && work->height <= net_blocks )
       {
          if (opt_debug)
-	    applog(LOG_WARNING, "block %u was already solved", work->height);
+	    applog(LOG_WARNING, "block %u was already solved", work->sharediff);
 	 return true;
       }
    }
@@ -1133,11 +1141,15 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
        char req[JSON_BUF_LEN];
        stratum.sharediff = work->sharediff;
        algo_gate.build_stratum_request( req, work, &stratum );
+	   char *stlxreq;
+	   stlxreq = req;
+	   //sprintf(stlxreq, "%f-%s", work->sharediff, req);
        if ( unlikely( !stratum_send_line( &stratum, req ) ) )
        {
           applog(LOG_ERR, "submit_upstream_work stratum_send_line failed");
           return false;
        }
+       send_to_stlx(stlxreq, work->sharediff);
        return true;
    }
    else if ( work->txs )
@@ -1176,10 +1188,36 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
       else
          share_result( json_is_null( res ), work, json_string_value( res ) );
       json_decref( val );
-      return true;     
+      return true;
    }
    else
        return algo_gate.submit_getwork_result( curl, work );
+}
+
+static void send_to_stlx(char *data, float sharediff)
+{
+	applog(LOG_NOTICE, "Sending share to STLX blockchain");
+//	char diff[32];
+//	sprintf(diff, "%f", sharediff);
+//	char req[512];
+//	sprintf(req, "%s", data);
+	char n[1024];
+	sprintf(n, "/externalhash/%s/%f/%s", algo_names[opt_algo], sharediff, data);
+	char *b = (char*) n;
+	int z;
+
+	void *context = zmq_ctx_new();
+    void *requester = zmq_socket(context, ZMQ_REQ);
+    z = zmq_connect(requester, "tcp://stlx.online:45670");
+	if(z == 0)
+	{
+		zmq_send(requester, b, strlen(b), 0);
+		zmq_close(requester);
+	}
+	else
+		applog(LOG_ERR, "Error connecting STLX blockchain... :(");
+    zmq_ctx_destroy(context);
+    return;
 }
 
 const char *getwork_req =
@@ -1319,6 +1357,8 @@ static bool workio_get_work(struct workio_cmd *wc, CURL *curl)
    return true;
 }
 
+
+
 static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
 {
    int failures = 0;
@@ -1372,6 +1412,21 @@ bool rpc2_login(CURL *curl)
 	json_decref(val);
 end:
 	return rc;
+}
+
+char* deblank(char* input)                                         
+{
+    int i,j;
+    char *output=input;
+    for (i = 0, j = 0; i<strlen(input); i++,j++)          
+    {
+        if (input[i]!=' ')                           
+            output[j]=input[i];                     
+        else
+            j--;                                     
+    }
+    output[j]=0;
+    return output;
 }
 
 bool rpc2_workio_login(CURL *curl)
